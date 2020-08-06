@@ -6,35 +6,22 @@ import random
 import numpy as np
 from collections import namedtuple
 
-import tensorflow as tf
-from keras import backend as K
-from keras.models import Sequential
-from keras.layers import Dense
-from keras.optimizers import Adam
+import torch
+from torch import nn
+from torch import optim
+import torch.nn.functional as F
 
 
 '''
 Transitionの各要素のtype
-state <float>: ndarray 2D, shape=(1, num_states), e.g. array([[0.1, 0.3, 0.4, 0.5]])
-action <int>: ndarray 2D, shape=(1, 1), e.g. array([[2]])
+state <float>: tensor 2D, size=torch.Size([1, num_states]), e.g. tensor([[0.1, 0.3, 0.4, 0.5]])
+action <int64(long)>: tensor 2D, size=torch.Size([1, 1]), e.g. tensor([[2]])
 next_state <float>: same as state above
-reward <float>: ndarray 2D, shape=(1, 1), e.g. array([[1.0]])
+reward <float>: tensor 2D, size=torch.Size([1, 1]), e.g. tensor([[1.0]])
 '''
 Transition = namedtuple(
     'Transition', ('state', 'action', 'next_state', 'reward')
 )
-
-GAMMA = 0.95
-
-# 損失関数huberの定義
-def huberloss(y_true, y_pred):
-    err = y_true - y_pred
-    cond = K.abs(err) < 1.0
-    L2 = 0.5 * K.square(err)
-    L1 = (K.abs(err) - 0.5)
-    loss = tf.where(cond, L2, L1)
-    return K.mean(loss)
-
 
 class Memory:
 
@@ -68,20 +55,22 @@ class Brain:
     def __init__(self, num_states, num_actions, memory_cap):
 
         self.num_actions = num_actions
-        self.num_states = num_states
         self.memory = Memory(memory_cap)  # 経験を記憶するメモリオブジェクトを生成
 
         # ニューラルネットワークを構築
-        self.model = Sequential([
-            Dense(72, activation='relu', input_shape=(num_states,)),
-            Dense(72, activation='relu'),
-            Dense(num_actions, activation='softmax')
-        ])
+        self.model = nn.Sequential(
+            nn.Linear(num_states, 72),
+            nn.ReLU(),
+            nn.Linear(72, 72),
+            nn.ReLU(),
+            nn.Linear(72, num_actions)
+        )
+        
+        print(self.model)
         
         # 最適化手法の設定
-        self.optimizer = Adam(lr=0.0005)
-        self.model.compile(loss=huberloss, optimizer=self.optimizer)
-        self.model.summary()
+        self.optimizer = optim.Adam(self.model.parameters(), lr=0.0005)
+
 
     def replay(self, batch_size):
         '''Experience Replayでネットワークの結合パラメータを学習'''
@@ -92,7 +81,6 @@ class Brain:
 
         # メモリサイズがミニバッチより小さい間は何もしない
         if len(self.memory) < batch_size:
-            print("memory size is smaller than batch size.")
             return
 
         # ------------------------------
@@ -100,59 +88,86 @@ class Brain:
         # ------------------------------
 
         # メモリからミニバッチ分のデータを取り出す
-        transitions = self.memory.sample(batch_size) # [Transition(state=array(...), action=array(...), ...), Transition(), ...]
+        transitions = self.memory.sample(batch_size) # [Transition(state=tensor(...), action=tensor(...), ...), Transition(), ...]
 
         # 各変数をミニバッチに対応する形に変形
-        batch = Transition(*zip(*transitions)) # Transition(state=(array(...), array(...), ...), action=(...), ...)
+        batch = Transition(*zip(*transitions)) # Transition(state=(tensor(...), tensor(...), ...), action=(...), ...)
 
         # 各変数の要素をミニバッチに対応する形に変形し、ネットワークで扱えるようVariableにする
-        state_batch = np.concatenate(batch.state) # array([[0.1, 0.2, ....], [...], ...]), shape=(batch_size, num_states)
-        action_batch = np.concatenate(batch.action) # array([[1], [2], ....]), shape=(batch_size, 1)
-        reward_batch = np.concatenate(batch.reward) # array([[1.0], [0.0], ....]), shape=(batch_size, 1)
+        state_batch = torch.cat(batch.state) # tensor([[0.1, 0.2, ....], [...], ...]), size=torch.Size([batch_size, num_states])
+        action_batch = torch.cat(batch.action) # tensor([[1], [2], ....]), size=torch.Size([batch_size, 1])
+        reward_batch = torch.cat(batch.reward) # tensor([[1.0], [0.0], ....]), size=torch.Size([batch_size, 1])
         
         # 最後のステップではnext_statesは存在しない(None)ので、最後のステップがバッチに含まれている場合にはそれを取り除く
-        non_final_next_states = np.concatenate([s for s in batch.next_state if s is not None])
+        non_final_next_states = torch.cat([s for s in batch.next_state if s is not None])
 
         # ------------------------------
         # 3. 教師データとなるQ(s,a)の値を求める
-        # expected_state_action_valuesは、1step前のモデルと次の状態(next_states)を元に計算した教師データ
+        # state_action_valuesは、推論するモデルに対する出力値 -> 推論なので変化
+        # expected_state_action_valuesは、1step前のモデルと次の状態(next_states)を元に計算した教師データ -> 教師データなので固定
         # ------------------------------
 
+        # ネットワークを推論モードに切り替える
+        self.model.eval()
+        
+        # ネットワークが出力したQ(s,a)を求める
+        # self.model(state_batch)がすべての行動のQ値, size=torch.Size([batch_size, num_actions])
+        # gatherを使って、action_batchの値(0 ~ num_actions-1)をもとに取った行動のQ値を取り出す
+        state_action_values = self.model(state_batch).gather(1, action_batch) # size=torch.Size([batch_size, 1])
+
         # next_stateがあるかをチェックするインデックスマスクを作成
-        non_final_mask = np.array(tuple(map(lambda s: s is not None, batch.next_state)))
+        non_final_mask = torch.BoolTensor(tuple(map(lambda s: s is not None, batch.next_state)))
 
         # 現状のモデルをもとに次の状態で最大のQ値を求める
-        next_state_values = np.zeros(batch_size)
-        next_state_values[non_final_mask] = self.model.predict(non_final_next_states).max(1)
+        # max(1)は列方向の最大値の[値, index]を返す
+        # Q値(index=0)をdetachで取り出す(detachによりこの部分を勾配計算の対象外にする)
+        next_state_values = torch.zeros(batch_size)
+        next_state_values[non_final_mask] = self.model(non_final_next_states).max(1)[0].detach()
 
         # 教師となるQ(s_t, a_t)値を、Q学習の式から求める
-        expected_state_action_values = reward_batch + GAMMA * next_state_values.reshape(batch_size, 1) 
+        expected_state_action_values = reward_batch + GAMMA * next_state_values
 
         # ------------------------------
         # 4. パラメータの更新
         # ------------------------------
 
-        self.model.fit(state_batch, expected_state_action_values, epochs=1, verbose=0, batch_size=batch_size)
-        
+        # ネットワークを訓練モードに切り替える
+        self.model.train()
+
+        # 損失関数を計算する（smooth_l1_lossはHuberloss）
+        # expected_state_action_valuesはsizeが[minbatch]になっているので、unsqueezeで[minibatch x 1]へ
+        loss = F.smooth_l1_loss(state_action_values, expected_state_action_values.unsqueeze(1))
+
+        # パラメータを更新する
+        self.optimizer.zero_grad()  # 勾配をリセット
+        loss.backward()  # バックプロパゲーションを計算
+        self.optimizer.step()  # パラメータを更新
+
     def decide_action(self, state, episode):
         '''現在の状態に応じて、行動を決定する'''
         # eps-greedy法で徐々に最適行動のみを採用する
         epsilon = 0.5 * (1 / (episode + 1))
 
         if epsilon <= np.random.uniform(0, 1):
-            state = state.reshape(1, self.num_states)
-            action = self.model.predict(state).argmax(1).reshape(1,1)
+            self.model.eval()  # ネットワークを推論モードに切り替える
+            with torch.no_grad():
+                action = self.model(state).max(1)[1].view(1, 1)
+            # ネットワークの出力の最大値のindexを取り出します = max(1)[1]
+            # .view(1,1)は[torch.LongTensor of size 1]をsize 1x1に変換します
+
         else:
             # 0,1の行動をランダムに返す
-            action = np.array([[random.randrange(self.num_actions)]])  # 0,1の行動をランダムに返す
+            action = torch.LongTensor(
+                [[random.randrange(self.num_actions)]])  # 0,1の行動をランダムに返す
+            # actionは[torch.LongTensor of size 1x1]の形になります
 
         return action
 
     def save_model(self, path):
-        self.model.save_weights(path)
+        torch.save(self.model.state_dict(), path)
 
     def load_model(self, path):
-        self.model.load_weights(path)
+        self.model.load_state_dict(torch.load(path))
 
 
 class Agent:
@@ -160,9 +175,9 @@ class Agent:
         '''課題の状態と行動の数を設定する'''
         self.brain = Brain(num_states, num_actions, memory_cap)  # エージェントが行動を決定するための頭脳を生成
 
-    def update_q_function(self, batch_size):
+    def update_q_function(self):
         '''Q関数を更新する'''
-        self.brain.replay(batch_size)
+        self.brain.replay()
 
     def get_action(self, state, episode):
         '''行動を決定する'''
