@@ -7,7 +7,6 @@ import random
 import rospy
 import subprocess
 import numpy as np
-import torch
 
 from geometry_msgs.msg import Twist, Vector3, PoseWithCovarianceStamped
 from sensor_msgs.msg import LaserScan
@@ -23,6 +22,7 @@ VEL = 0.5
 OMEGA = 15.0 * math.pi / 180.0
 
 NUM_STATES = 24
+BATCH_SIZE = 32
 
 # action list, [velocity, angle]
 action_list = {
@@ -83,10 +83,6 @@ def convert_coord_from_gazebo_to_amcl(my_color, gazebo_x, gazebo_y):
         amcl_y    =  gazebo_x
     return amcl_x, amcl_y
 
-def numpy2torch(array):
-    array = torch.from_numpy(array).type(torch.FloatTensor)
-    array = torch.unsqueeze(array, 0)
-    return array
 
 class DQNBot():
 
@@ -154,7 +150,7 @@ class DQNBot():
 
         state = [my_pos_x, my_pos_y, my_angle, en_pos_x, en_pos_y, en_angle] + field_score + my_body + en_body
 
-        return np.array(state)
+        return np.array(state).reshape(1, NUM_STATES)
 
     def callback_amcl_pose(self, data):
         pos = data.pose.pose.position
@@ -267,7 +263,7 @@ class DQNBot():
         self.d_my_score = 0.0
         self.d_en_score = 0.0
         self.agent = DQN.Agent(num_states=NUM_STATES, num_actions=len(action_list), memory_cap=NUM_STEP)
-        self.agent.brain.load_model('./weight.pt')
+        self.agent.brain.load_model('./weight.hdf5')
         subprocess.call('bash ../catkin_ws/src/burger_war/burger_war/scripts/reset_state.sh', shell=True)
 
     def strategy(self):
@@ -275,7 +271,7 @@ class DQNBot():
 
         self.agent = DQN.Agent(num_states=NUM_STATES, num_actions=len(action_list), memory_cap=NUM_STEP)
 
-        state = numpy2torch(self.getState())
+        state = self.getState()
 
         while not rospy.is_shutdown():
             
@@ -287,19 +283,19 @@ class DQNBot():
             if self.step > NUM_STEP:
                 state_next = None
             else:
-                state_next = numpy2torch(self.getState())
+                state_next = self.getState()
 
             reward = self.cal_reward()
-            reward = torch.FloatTensor([[reward]])
+            reward = np.array([[reward]])
 
             self.agent.memorize(state, action, state_next, reward)
-            self.agent.update_q_function()
-            state = next_state
+            self.agent.update_q_function(batch_size=BATCH_SIZE)
+            state = state_next
             
             if self.step > NUM_STEP:
-                self.agent.brain.save_model('./weight.pt')
+                self.agent.brain.save_model('./weight.hdf5')
                 self.restart()
-                state = numpy2torch(self.getState())
+                state = self.getState()
                 self.episode += 1
                 r.sleep()
             else:
@@ -308,6 +304,13 @@ class DQNBot():
 
 
 if __name__ == '__main__':
+
+    rname = rosparam.get_param('randomRun/rname')
+    rside = rosparam.get_param('randomRun/rname')
+    if rname == 'red_bot' or rside == 'r': color = 'r'
+    else                                 : color = 'b'
+    print('****************', rname, rside, color)
+
     rospy.init_node('dqn_run')
-    bot = DQNBot('DQN')
+    bot = DQNBot('DQN', color=color)
     bot.strategy()
