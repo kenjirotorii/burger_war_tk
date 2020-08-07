@@ -11,7 +11,7 @@
     <include file="$(find burger_navigation)/launch/burger_navigation.launch">
     </include>
 
-    <node pkg="burger_war" type="TeamEmbeddedAI.py" name="randomRun" output="screen">
+    <node pkg="burger_war" type="run_dqn.py" name="randomRun" output="screen">
       <param name="rname" value="$(arg robot_name)" />
       <param name="rside" value="$(arg side)" />
     </node>

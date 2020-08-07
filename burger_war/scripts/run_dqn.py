@@ -8,8 +8,11 @@ import rospy
 import subprocess
 import numpy as np
 
+from std_msgs.msg import String
+from gazebo_msgs.msg import ModelStates
 from geometry_msgs.msg import Twist, Vector3, PoseWithCovarianceStamped
 from sensor_msgs.msg import LaserScan
+import rosparam
 
 from RL import DQN
 
@@ -96,7 +99,7 @@ class DQNBot():
         self.pos = np.zeros(12)
         self.my_color = color                           # 自分の色
         self.en_color = 'b' if color == 'r' else 'r'    # 敵の色
-        self.field_socre = {k: 0.0 for k in field_score_name}
+        self.field_score = {k: 0.0 for k in field_score_name}
         self.body_score = {k: 0.0 for k in body_score_name}
         self.my_score = 0.0
         self.en_score = 0.0
@@ -134,13 +137,13 @@ class DQNBot():
 
         my_pos_x, my_pos_y = rotate_pose(self.pos[0], self.pos[1])
         my_angle = tf.transformations.euler_from_quaternion((self.pos[2], self.pos[3], self.pos[4], self.pos[5]))
-        my_angle = normalize_angle(my_angle.z)
+        my_angle = normalize_angle(my_angle[2])
 
         en_pos_x, en_pos_y = rotate_pose(self.pos[6], self.pos[7])
         en_angle = tf.transformations.euler_from_quaternion((self.pos[8], self.pos[9], self.pos[10], self.pos[11]))
-        en_angle = normalize_angle(en_angle.z)
+        en_angle = normalize_angle(en_angle[2])
 
-        field_score = [v for v in self.field_socre.values()]
+        field_score = [v for v in self.field_score.values()]
         if self.my_color == 'r':
             my_body = [v for v in self.body_score.values()[:3]]
             en_body = [v for v in self.body_score.values()[3:]]
@@ -236,7 +239,7 @@ class DQNBot():
         return False
 
     def updatePoseTwist(self, action):
-        vel, omega = action_list[action]
+        vel, omega = action_list[action[0, 0]]
         self.twist.angular.z = omega
         self.twist.linear.x = vel
 
@@ -256,14 +259,14 @@ class DQNBot():
     def restart(self):
         self.vel_pub.publish(Twist())  # 動きを止める
         self.step = 0
-        self.field_socre = {k: 0.0 for k in field_score_name}
+        self.field_score = {k: 0.0 for k in field_score_name}
         self.body_score = {k: 0.0 for k in body_score_name}
         self.my_score = 0.0
         self.en_score = 0.0
         self.d_my_score = 0.0
         self.d_en_score = 0.0
         self.agent = DQN.Agent(num_states=NUM_STATES, num_actions=len(action_list), memory_cap=NUM_STEP)
-        self.agent.brain.load_model('./weight.hdf5')
+        self.agent.brain.load_model('./weight_dqn.hdf5')
         subprocess.call('bash ../catkin_ws/src/burger_war/burger_war/scripts/reset_state.sh', shell=True)
 
     def strategy(self):
@@ -289,11 +292,12 @@ class DQNBot():
             reward = np.array([[reward]])
 
             self.agent.memorize(state, action, state_next, reward)
+            print("step:{}, state:{}, action:{}, state_next:{}, reward:{}".format(self.step, state, action, state_next, reward))
             self.agent.update_q_function(batch_size=BATCH_SIZE)
             state = state_next
             
             if self.step > NUM_STEP:
-                self.agent.brain.save_model('./weight.hdf5')
+                self.agent.brain.save_model('./weight_dqn.hdf5')
                 self.restart()
                 state = self.getState()
                 self.episode += 1
