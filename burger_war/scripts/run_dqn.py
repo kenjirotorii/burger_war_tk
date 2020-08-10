@@ -40,6 +40,15 @@ action_list = {
     8: [VEL, OMEGA],
 }
 
+# action_list = {
+#     0: [0.0, -OMEGA],
+#     1: [0.0, 0.0],
+#     2: [0.0, OMEGA],
+#     3: [VEL, -OMEGA],
+#     4: [VEL, 0.0],
+#     5: [VEL, OMEGA],
+# }
+
 # score names
 body_score_name = ('RE_B', 'RE_L', 'RE_R', 'BL_B', 'BL_L', 'BL_R')
 field_score_name = ('hoge1_N', 'hoge1_S', 'hoge2_N', 'hoge2_S', 'hoge3_N', 'hoge3_S',
@@ -223,7 +232,7 @@ class DQNBot():
                 name = target['name']
                 if name in body_score_name:
                     self.body_score[name] = 1.0
-                else:
+                elif name in field_score_name:
                     if target['player'] == self.my_color:
                         self.field_score[name] = 1.0
                     else:
